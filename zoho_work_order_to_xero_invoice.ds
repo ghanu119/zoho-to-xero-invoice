@@ -1,0 +1,280 @@
+void automation.workOrderToXeroInvoice(Int workOrderID)
+{
+
+    xeroUrl = "https://api.xero.com/";
+    xeroApiUrl = "https://api.xero.com/api.xro/2.0/";
+
+    // Steps to create a custom link: 
+    // https://help.zoho.com/portal/en/kb/fsm/custom-integrations/xero/articles/xero-integration#Create_a_connection_for_Xero
+
+    xeroConnection = "xero_connection_name"; // Add your Xero custom connection name
+
+    xeroAccountId = "";
+
+    header_data = Map();
+    header_data.put("Content-Type","application/json");
+    
+    if(workOrderID)
+    {
+        workOrderDetails = zoho.crm.getRecordById("Work_Orders",workOrderID);
+        workOrderDescription = workOrderDetails.get("Description");
+        
+        // When you create a custom Xero connection then Zoho give an example to work with Xero APIs
+        response = invokeurl
+        [
+            url :xeroUrl + "connections"
+            type :GET
+            connection:xeroConnection
+        ];
+
+        // As Xero provide the multi tenant and you can create multiple organisation then you need a tenant-id to deal with Xero data
+        tenantId = response.get(0).get("tenantId");
+
+        // On each request we will pass header data with selected tenant id
+        // As we have selected the organisation at the time of the authorisation at the time of connection creation of Xero from the Zoho custom connection
+        // We will always have a single tenant-id
+        header_data.put("xero-tenant-id",tenantId);
+
+        clientName = workOrderDetails.get("Client_Name");
+        lineItems = workOrderDetails.get("List_Items");
+
+        xero_line_items = list(); // we will create a item list from the work order to pass to the Xero invoice
+        
+        for each  item in lineItems
+        {
+            itemProdData = item.get("Product_Name"); 
+
+            // We only add the item if we have product data. Obviously we will have product data
+            if(itemProdData != "")
+            {
+                prodName = itemProdData.get("name");
+                prodCode = itemProdData.get("id");
+                prodId = itemProdData.get("id");
+                prodDescription = "Automated created from Zoho CRM"; // In xero we add this description to identify that product created from the Zoho CRM
+                if(prodId != "" && prodId != null)
+                {
+                    prodDetails = zoho.crm.getRecordById("Products",prodId);
+                    if(prodDetails != null)
+                    {
+                        prodCode = prodDetails.get("Product_Code");
+                        prodDescription = prodDetails.get("Description");
+                    }
+                }
+                xeroItemformData = Map();
+                prodNameLen = prodName.length();
+
+                // Xero only allowed a 50 characters name on the product name so we restricted it.
+                if(prodNameLen > 50)
+                {
+                    prodName = prodName.subString(0,50);
+                }
+
+                xeroItemformData.put("where","Name==\"" + prodName + "\"");
+                // first we check that product is exists or not if not then we will create a new one
+                response = invokeurl
+                [
+                    url :xeroApiUrl + "Items"
+                    type :GET
+                    parameters:xeroItemformData
+                    headers:header_data
+                    connection:xeroConnection
+                ];
+                xeroItemId = "";
+
+                // If we not found the product with the item name then we will create a new
+                if(response.get("Items").isEmpty())
+                {
+                    postItemData = Map();
+                    postItemData.put("code",prodCode);
+                    postItemData.put("name",prodName);
+                    postItemData.put("description",prodDescription);
+                    itemPostReq = invokeurl
+                    [
+                        url :xeroApiUrl + "Items"
+                        type :POST
+                        parameters:postItemData.toString()
+                        headers:header_data
+                        connection:xeroConnection
+                    ];
+                    if(itemPostReq.get("Status") == "OK")
+                    {
+                        xeroItemCode = itemPostReq.get("Code");
+                    }
+                }
+                else
+                {
+                    itemPostReq = response.get("Items").get(0);
+                    xeroItemCode = itemPostReq.get("Code");
+                }
+                // Now we add the product details to items list for the Xero
+                xero_item = Map();
+                xero_item.put("description",item.get("Description"));
+                xero_item.put("quantity",item.get("Quantity"));
+                xero_item.put("LineAmount",item.get("List_Price"));
+                xero_item.put("UnitAmount",item.get("List_Price"));
+                xero_item.put("ItemCode",xeroItemCode);
+                //xero_item.put("AccountCode", prodCode); // Adjust account code as per Xero setup
+                xero_line_items.add(xero_item);
+            }
+        }
+    }
+    // Find contact in Xero by email of contact.
+    email = workOrderDetails.get("Email");
+    contactSearchData = Map();
+    contactSearchData.put("where","EmailAddress==\"" + email + "\"");
+
+    // we will find the contact by email in Xero
+    response = invokeurl
+    [
+        url :xeroApiUrl + "Contacts"
+        type :GET
+        parameters:contactSearchData
+        headers:header_data
+        connection:xeroConnection
+    ];
+    xeroItemId = "";
+
+    // If no contact exists with the specific email then we create a new contact in Xero to attach the contact to our Invoice
+    if(response.get("Contacts").isEmpty())
+    {
+        contactName = workOrderDetails.get("Name");
+        firstName = contactName;
+        companyData = workOrderDetails.get("Company");
+        companyAbnNo = "";
+        addressData = Map();
+        quotationData = workOrderDetails.get("Quotation");
+
+        // Here I have added a company name to contact name to the Xero invoice contact
+        // As first priority is to give the name of company as Contact and then contact name will be attached with the contact
+        if(companyData == null || companyData && companyData.isEmpty())
+        {
+            companyData = workOrderDetails.get("Owner");
+            if(companyData != null && !companyData.isEmpty())
+            {
+                firstName = companyData.get("name");
+            }
+        }
+        else
+        {
+            companyDetails = zoho.crm.getRecordById("Accounts",companyData.get("id"));
+            // If we have address details then we also add the address details
+            if(!companyDetails.isEmpty())
+            {
+                addressData.put("address_line1",companyDetails.get("Billing_Street"));
+                addressData.put("city",companyDetails.get("Billing_City"));
+                addressData.put("country",companyDetails.get("Billing_Country"));
+                addressData.put("postal_code",companyDetails.get("Billing_Code"));
+                addressData.put("address_type","POBOX");
+            }
+        }
+        if(quotationData != null && !quotationData.isEmpty())
+        {
+            firstName = quotationData.get("name");
+        }
+        if(companyData != null && !companyData.isEmpty())
+        {
+            contactName = companyData.get("name");
+        }
+
+        postItemData = Map();
+        postItemData.put("IsCustomer",true);
+        postItemData.put("addresses",{addressData});
+        postItemData.put("name",contactName);
+        postItemData.put("FirstName",firstName);
+        postItemData.put("LastName","");
+        postItemData.put("EmailAddress",email);
+        postItemData.put("CompanyNumber",companyAbnNo);
+        itemPostReq = invokeurl
+        [
+            url :xeroApiUrl + "Contacts"
+            type :POST
+            parameters:postItemData.toString()
+            headers:header_data
+            connection:xeroConnection
+        ];
+        if(itemPostReq.get("Status") == "OK")
+        {
+            xeroContactId = itemPostReq.get("Contacts").get(0).get("ContactId");
+        }
+    }
+    else
+    {
+        itemPostReq = response.get("Contacts").get(0);
+        xeroContactId = itemPostReq.get("ContactID");
+    }
+
+    // Now we gathered the most important details for Xero invoice like contact and product details
+    invoiceDueDate = workOrderDetails.get("Due_Date");
+    totalAmnt = workOrderDetails.get("Grand_Total");
+    subTotalAmnt = workOrderDetails.get("Sub_Total");
+
+    if(totalAmnt != null && !totalAmnt.isEmpty())
+    {
+        totalAmnt = totalAmnt.toDecimal();
+    }
+    else
+    {
+        totalAmnt = 0;
+    }
+
+    if(subTotalAmnt != null && !subTotalAmnt.isEmpty())
+    {
+        subTotalAmnt = subTotalAmnt.toDecimal();
+    }
+    else
+    {
+        subTotalAmnt = 0;
+    }
+    
+    invoiceData = Map();
+    
+    contactData = Map();
+
+    contactData.put("ContactID",xeroContactId);
+    
+    invoiceData.put("type","ACCREC");
+    invoiceData.put("InvoiceNumber","zoho " + workOrderID);
+    invoiceData.put("Reference","zoho " + workOrderDetails.get("Work_Order_Number"));
+    if(invoiceDueDate != null && !invoiceDueDate.isEmpty())
+    {
+        invoiceData.put("DueDate",invoiceDueDate);
+    }
+    invoiceData.put("Contact",contactData);
+    invoiceData.put("LineItems",xero_line_items);
+    invoiceData.put("Total",workOrderDetails.get("Grand_Total"));
+    invoiceData.put("SubTotal",workOrderDetails.get("Sub_Total"));
+    invoiceData.put("TotalTax",totalAmnt - subTotalAmnt);
+    
+    // if we have Xero id on the work order then we will update the invoice.
+    // This is the custom field that Zoho allow us to add to the respective module. If you do not have then you can create by visitin below link
+    // https://help.zoho.com/portal/en/kb/crm/customize-crm-account/customizing-fields/articles/use-custom-fields#Add_Custom_Fields
+    existsXeroId = workOrderDetails.get("Xero_ID");
+    
+    if(existsXeroId != null)
+    {
+        existsXeroId = "/" + existsXeroId;
+    }
+    else
+    {
+        existsXeroId = "";
+    }
+
+    invoiceRes = invokeurl
+    [
+        url :xeroApiUrl + "Invoices" + existsXeroId
+        type :POST
+        parameters:invoiceData.toString()
+        headers:header_data
+        connection:xeroConnection
+    ];
+
+    // After posting invoice data to xero we will update the Invoice id of Xero to our work order custom field Xero_ID
+    if(invoiceRes.get("Status") == "OK")
+    {
+        invoiceData = invoiceRes.get("Invoices").get(0);
+        workOrderData = Map();
+        workOrderData.put("Xero_ID",invoiceData.get("InvoiceID"));
+        zoho.crm.updateRecord("Work_Orders",workOrderID,workOrderData);
+    }
+
+}
